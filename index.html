@@ -838,16 +838,42 @@ function fs(n){
   if(isNaN(v)) return '-';
   return v===0 ? 'E' : v>0 ? '+'+v : ''+v;
 }
+function isCut(sc){
+  if(!sc) return false;
+  var p = (sc.pos||'').toUpperCase();
+  return p==='MC'||p==='CUT'||p==='WD'||p==='DQ'||p==='MDF';
+}
+
 function calcScore(e){
-  var scored = e.picks.filter(Boolean).map(function(p){
+  var results = e.picks.filter(Boolean).map(function(p){
     var sc = S.liveScores[p.toLowerCase()];
     if(!sc) return null;
-    if(sc.pos==='WD'||sc.pos==='DQ') return null;
+    if(isCut(sc)) return null;
     return sc.sn;
   }).filter(function(s){ return s!==null; });
-  if(!scored.length) return null;
-  scored.sort(function(a,b){ return a-b; });
-  return scored.slice(0,CFG.scoring).reduce(function(a,b){ return a+b; }, 0);
+  if(!results.length) return null;
+  // Check min 3 must make cut (only enforce once cut has been made)
+  var cutMade = e.picks.some(function(p){
+    var sc = p ? S.liveScores[p.toLowerCase()] : null;
+    return sc && isCut(sc);
+  });
+  if(cutMade && results.length < CFG.scoring) return null; // failed min cut rule
+  results.sort(function(a,b){ return a-b; });
+  return results.slice(0,CFG.scoring).reduce(function(a,b){ return a+b; }, 0);
+}
+
+function getMadeCut(e){
+  return e.picks.filter(Boolean).filter(function(p){
+    var sc = S.liveScores[p.toLowerCase()];
+    return sc && !isCut(sc);
+  }).length;
+}
+
+function getMissedCut(e){
+  return e.picks.filter(Boolean).filter(function(p){
+    var sc = S.liveScores[p.toLowerCase()];
+    return sc && isCut(sc);
+  });
 }
 function countingIdx(e){
   var scored = e.picks.map(function(p,i){
@@ -968,15 +994,23 @@ function renderLB(sorted){
     row.appendChild(rkC);
     var prizes = ['','€156','€65','€39'];
     var prizeHtml = prizes[rk] ? ' <span style="display:inline-block;padding:1px 7px;border-radius:10px;font-size:10px;font-weight:700;background:rgba(240,201,74,.2);color:var(--gold);margin-left:6px">'+prizes[rk]+'</span>' : '';
+    var madeCut = getMadeCut(e);
+    var missedCut = getMissedCut(e);
+    var cutHtml = '';
+    if(missedCut.length > 0){
+      var cutNames = missedCut.map(function(p){ return p.split(' ').pop(); }).join(', ');
+      var cutColor = madeCut < CFG.scoring ? 'var(--red)' : 'var(--txt3)';
+      cutHtml = '<div style="font-size:9px;color:'+cutColor+';margin-top:2px">CUT: '+cutNames+(madeCut < CFG.scoring ? ' ⚠ only '+madeCut+' made cut' : '')+'</div>';
+    }
     var nmC = document.createElement('div');
     nmC.className = 'cell cell-nm';
-    nmC.innerHTML = '<div class="p-name">'+e.name+mvHtml+prizeHtml+'</div><div class="p-team">'+(e.team||'')+'</div>'+tbStr;
+    nmC.innerHTML = '<div class="p-name">'+e.name+mvHtml+prizeHtml+'</div><div class="p-team">'+(e.team||'')+'</div>'+tbStr+cutHtml;
     row.appendChild(nmC);
     for(var t=0;t<CFG.tiers;t++){
       var pick=e.picks[t]||'', sc=pick?S.liveScores[pick.toLowerCase()]:null;
       var isCnt=cnt[t]&&pick&&sc;
       var sT='-',sC='d',pos='';
-      if(pick&&sc){ sT=fs(sc.sn); sC=sc.sn<0?'r':sc.sn>0?'b':'m'; if(sc.pos==='MC'||sc.pos==='CUT'){sC='d';sT='CUT';} pos=sc.thru||''; }
+      if(pick&&sc){ sT=fs(sc.sn); sC=sc.sn<0?'r':sc.sn>0?'b':'m'; if(isCut(sc)){sC='d';sT='CUT';} pos=sc.thru||''; }
       var short=pick?pick.split(' ').pop():'-';
       var tDiv = document.createElement('div');
       tDiv.className='cell cell-t t'+t+(isCnt?' counting':'');
@@ -1381,6 +1415,14 @@ function fetchScores(manual){
   })(0);
 }
 
+function normalizeName(s){
+  return s.toLowerCase()
+    .replace(/ä/g,'a').replace(/ö/g,'o').replace(/ü/g,'u')
+    .replace(/å/g,'a').replace(/ø/g,'o').replace(/æ/g,'ae')
+    .replace(/é/g,'e').replace(/è/g,'e').replace(/ê/g,'e')
+    .replace(/ó/g,'o').replace(/ú/g,'u').replace(/í/g,'i')
+    .replace(/[^a-z0-9 ]/g,'');
+}
 function parseESPN(ev){
   try{
     var comp=ev.competitions&&ev.competitions[0]; if(!comp) return false;
@@ -1414,15 +1456,21 @@ function parseESPN(ev){
       var nat=(c.athlete&&c.athlete.flag&&c.athlete.flag.description)||'-';
       // Store by ESPN name
       ns[name.toLowerCase()]={name:name,pos:pos,sn:sn,thru:thruDisplay,tot:totStr};
-      // Match picks by first initial + last name
-      var espnParts=name.toLowerCase().split(' ');
+      // Match picks by normalized name and first initial + last name
+      var espnNorm=normalizeName(name);
+      var espnParts=espnNorm.split(' ');
       var espnLast=espnParts[espnParts.length-1];
       var espnFirst=espnParts[0]?espnParts[0][0]:'';
       S.entries.forEach(function(entry){
         entry.picks.filter(Boolean).forEach(function(pick){
           var pk=pick.toLowerCase();
           if(ns[pk]) return;
-          var pp=pk.split(' ');
+          var pkNorm=normalizeName(pick);
+          if(pkNorm===espnNorm){
+            ns[pk]={name:pick,pos:pos,sn:sn,thru:thruDisplay,tot:totStr};
+            return;
+          }
+          var pp=pkNorm.split(' ');
           if(pp[pp.length-1]===espnLast&&pp[0]&&pp[0][0]===espnFirst){
             ns[pk]={name:pick,pos:pos,sn:sn,thru:thruDisplay,tot:totStr};
           }
@@ -1431,7 +1479,12 @@ function parseESPN(ev){
       FIELD.forEach(function(fp){
         var fk=fp.n.toLowerCase();
         if(ns[fk]) return;
-        var fp2=fk.split(' ');
+        var fkNorm=normalizeName(fp.n);
+        if(fkNorm===espnNorm){
+          ns[fk]={name:fp.n,pos:pos,sn:sn,thru:thruDisplay,tot:totStr};
+          return;
+        }
+        var fp2=fkNorm.split(' ');
         if(fp2[fp2.length-1]===espnLast&&fp2[0]&&fp2[0][0]===espnFirst){
           ns[fk]={name:fp.n,pos:pos,sn:sn,thru:thruDisplay,tot:totStr};
         }
